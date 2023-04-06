@@ -4,113 +4,118 @@ on:
     types: [opened]
 
 jobs:
-  update_sheet:
+  get-delivery-files:
     runs-on: ubuntu-latest
+    outputs:
+      filenames: ${{ steps.files.outputs.added }}
+    
     steps:
-      - name: 'get all added files in the PR'
-        id: 'files'
-        uses: mmagician/get-changed-files@v2
-        env:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Get filenames of any deliveries being added
+        id: files
+        uses: Ana06/get-changed-files@v2.0.0
+        with:
+          format: 'json'
+          filter: |
+            deliveries/*.md
+            maintenance_deliveries/*.md
 
-      - name: 'Checkout delivery'
-        uses: actions/checkout@v2
+  check-no-success:
+    needs: get-delivery-files
+    runs-on: ubuntu-latest
+    outputs:
+      has-succeeded: ${{ steps.check-no-success.outputs.has-succeeded }}
+    
+    steps:
+      - name: Check that the workflow didn't yet run successfully in this PR
+        uses: actions/github-script@v5
+        id: check-no-success
+        if: needs.get-delivery-files.outputs.filenames != '[]'
+        with:
+          script: |
+            // https://octokit.github.io/rest.js/v18
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'google_sheet_update.yml',
+              status: 'success',
+              per_page: 100
+            });
+            const pr_commits = await github.rest.pulls.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: ${{ github.event.number }},
+              per_page: 100
+            });
+            const runs_shas = runs.data.workflow_runs.map(run => {return run.head_sha});
+            const pr_shas = pr_commits.data.map(c => {return c.sha});
+            core.setOutput("has-succeeded", pr_shas.filter(s => runs_shas.includes(s)).length != 0);
+
+  update-sheet:
+    needs: [ get-delivery-files, check-no-success ]
+    if: needs.get-delivery-files.outputs.filenames != '[]' && needs.check-no-success.outputs.has-succeeded == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        filename: ${{ fromJson(needs.get-delivery-files.outputs.filenames) }}
+    steps:
+      - uses: actions/checkout@v2
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Parse delivery file 
+        id: parse-delivery
+        uses: w3f/parse-milestone-delivery-action@master
+        with:
+          path: "${{ github.workspace }}/${{ matrix.filename }}"
+          strict: "false"
+
+      - name: Get application file
+        run: wget "https://raw.githubusercontent.com/w3f/Grants-Program/master/applications/${{ steps.parse-delivery.outputs.application_document }}"
+
+      - name: Parse application file
+        id: parse-grant
+        uses: w3f/parse-grant-application-action@master
+        with:
+          path: "${{ steps.parse-delivery.outputs.application_document }}"
+          strict: "false"
       
-      - name: 'parse milestone'
-        id: milestone_parser
-        uses: w3f-community/read-file-action@v2.12
-        with:
-          path: "${{ github.workspace }}/${{ steps.files.outputs.added }}"
-
-      - name: Get application PR link
-        uses: actions/github-script@0.9.0
-        id: get_application_pr
-        env:
-          link: ${{ steps.milestone_parser.outputs.pr_link }}
-        with: 
-          script: |
-            var uri_pattern = /[-a-zA-Z0-9@:%_\+.~#?&//=]{2,256}\.[a-z]{2,4}\b(\/[-a-zA-Z0-9@:%_\+.~#?&//=]*)?/i;
-            let application_pr = process.env.link.match(uri_pattern);
-            console.log({application_pr});
-            core.setOutput('application_pr', application_pr[0]);
-            let application_pr_number = application_pr[0].split('/').pop()
-            console.log({application_pr_number});
-            core.setOutput('application_pr_number', new String(application_pr_number));
-
-      - run: "echo application PR: ${{ steps.get_application_pr.outputs.application_pr }}"
-      - run: "echo application PR number: ${{ steps.get_application_pr.outputs.application_pr_number }}"
-
-      - name: 'Get application PR data'
-        if: ${{ success() }}
-        uses: octokit/request-action@v2.x
-        id: get_application_pr_data
-        with:
-          route: GET /repos/w3f/Open-Grants-Program/pulls/${{ steps.get_application_pr.outputs.application_pr_number }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # - name: 'parse application'
-      #   if: ${{ success() }}
-      #   id: grant_parser
-      #   uses: mmagician/read-file-action@v1
-      #   with:
-      #     path: "${{ github.workspace }}/${{ steps.files.outputs.added }}"
-
-      - name: Get current date
+      - name: Get delivery date
         id: date
-        run: echo "::set-output name=date::$(date +'%d/%m/%Y')"
-
-      - name: 'check author validity'
-        id: 'validate_pr'
-        uses: w3f-community/validate_pr@master
-        with:
-          targetRepoOwner: "w3f"
-          targetRepo: "Open-Grants-Program"
-          prLink: ${{ steps.milestone_parser.outputs.pr_link }}
-          author: ${{ github.event.pull_request.user.login }}
-
-      - name: Get last row
-        id: get_last_row
-        uses: mmagician/gsheet.action@v0.1.0
+        run: |
+          delivery_date=${{ github.event.pull_request.created_at }}        
+          echo "::set-output name=date::$(date -d "$delivery_date" +%d/%m/%Y)"
+  
+      - name: Write data to sheet
+        uses: jroehl/gsheet.action@v1.1.1
         with:
           spreadsheetId: ${{ secrets.SPREADSHEET_ID }}
-          startRow: 420
-          worksheetTitle: "Evaluation"
-        env:
-          GSHEET_CLIENT_EMAIL: ${{ secrets.GSHEET_CLIENT_EMAIL }}
-          GSHEET_PRIVATE_KEY: ${{ secrets.GSHEET_PRIVATE_KEY }}
-
-      - name: 'write the data to a gsheet'
-        if: "${{ steps.validate_pr.outputs.isValid }}"
-        id: 'update_worksheet'
-        uses: jroehl/gsheet.action@v1.0.0 # you can specify '@release' to always have the latest changes
-        with:
-          spreadsheetId: ${{ secrets.SPREADSHEET_ID }}
-          commands: | # list of commands, specified as a valid JSON string. Second entry in 'data' should be project name.
+          commands: |
             [
-              { 
-                "command": "appendData", 
-                "args": 
-                { 
+              {
+                "command": "appendData",
+                "args":
+                {
                   "data": [[
-                    "=IFERROR(HYPERLINK(\"#gid=0&range=\" & MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))), Legal!$D:$D, 0) & \":\" & MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))), Legal!$D:$D, 0), INDEX(Legal!$A$2:$A,MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))),Legal!$D$2:$D,0))), \"\")", 
-                    "", 
-                    "${{ steps.milestone_parser.outputs.milestone_number }}", 
+                    "=IFERROR(HYPERLINK(\"#gid=0&range=\" & MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))), Legal!$D:$D, 0) & \":\" & MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))), Legal!$D:$D, 0), INDEX(Legal!$A$2:$A,MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))),Legal!$D$2:$D,0))), \"\")",
+                    "${{ steps.parse-grant.outputs.project_name }}",
+                    "${{ steps.parse-delivery.outputs.milestone_number }}",
                     "",
-                    "Not Yet", 
-                    "3", 
+                    "Not Yet",
+                    "=IFERROR(SWITCH(INDIRECT(ADDRESS(ROW(),COLUMN()-1)), \"Not Yet\", 4, \"In Progress\", 3, \"Asked for Changes\", 2, \"Final Check\", 3, \"Final Warning\", 3, \"Done\", 0, \"Terminated\", 0, \"On Hold\", 1))",
                     "=INDEX(Legal!$W$2:$W,MATCH(INDIRECT(CONCATENATE(\"B\", TEXT(ROW(), \"#\"))),Legal!$D$2:$D,0))",
-                    "${{ steps.get_application_pr_data.outputs.application_pr }}",
                     "${{ github.event.pull_request.html_url }}",
-                    "", 
-                    "${{ steps.date.outputs.date }}"
-                  ]], 
-                  "worksheetTitle": "Evaluation", 
+                    "",
+                    "${{ steps.date.outputs.date }}",
+                    "",
+                    "=IF(ISNUMBER(INDIRECT(ADDRESS(ROW(),11))),INDIRECT(ADDRESS(ROW(),11))-INDIRECT(ADDRESS(ROW(),10)),\"\")",
+                    "=IF(INDIRECT(ADDRESS(ROW(),5))=\"Done\",VLOOKUP(INDIRECT(ADDRESS(ROW(),2)),Milestones!B:BE,SWITCH(INDIRECT(ADDRESS(ROW(),3)),1,19,2,23,3,27,4,31,5,35,6,39,7,43,8,47,9,51,10,55),FALSE),\"\")",
+                    "=IF(INDIRECT(ADDRESS(ROW(),5))=\"Done\",VLOOKUP(INDIRECT(ADDRESS(ROW(),2)),Milestones!B:BE,SWITCH(INDIRECT(ADDRESS(ROW(),3)),1,20,2,24,3,28,4,32,5,36,6,40,7,44,8,48,9,52,10,56),FALSE),\"\")"
+                  ]],
+                  "worksheetTitle": "Evaluation",
                   "minCol": 1,
-                  "valueInputOption": "USER_ENTERED",
-                  "minRow": "${{ steps.get_last_row.outputs.lastRow }}"
+                  "valueInputOption": "USER_ENTERED"
                 }
                }
             ]

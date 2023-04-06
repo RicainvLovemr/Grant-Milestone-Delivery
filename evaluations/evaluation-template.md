@@ -1,10 +1,11 @@
 # Evaluation
 
 > Don't remove any of the mandatory parts presented in bold letters or as headlines!
+> When evaluating the last milestone of a grant, check if the finished grant refers to an [RFP](https://github.com/w3f/Grants-Program/blob/master/rfps/README.md) and move the corresponding RFP to [implemented](https://github.com/w3f/Grants-Program/tree/master/rfps/implemented).
 > Lines starting with `>`, such as this one, can be removed.
 
 - **Status:** In Progress/Accepted/Rejected
-- **PR Link:** Please, provide a link to the initial accepted pull request of grant, which you're evaluating to the [Web3 Foundation Open Grants Program repository](https://github.com/w3f/Open-Grants-Program).
+- **Application Document:** Please, provide a link to the merged contract (the `.md` file in the [applications](https://github.com/w3f/Grants-Program/tree/master/applications) directory). 
 - **Milestone:** Number
 - **Kusama Identity:** Address
 - **Previously successfully merged evaluation:** Link
